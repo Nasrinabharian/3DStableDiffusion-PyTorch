@@ -5,9 +5,29 @@ import torch
 import torchvision
 import numpy as np
 from PIL import Image
-from utils.diffusion_utils import load_latents
+#from utils.diffusion_utils import load_latents
 from tqdm import tqdm
 from torch.utils.data.dataset import Dataset
+
+from torch.utils.data.dataset import Dataset
+import pickle
+import glob
+import os
+import torch
+
+
+def load_latents(latent_path):
+    r"""
+    Simple utility to save latents to speed up ldm training
+    :param latent_path:
+    :return:
+    """
+    latent_maps = {}
+    for fname in glob.glob(os.path.join(latent_path, '*.pkl')):
+        s = pickle.load(open(fname, 'rb'))
+        for k, v in s.items():
+            latent_maps[k] = v[0]
+    return latent_maps
 
 
 class CelebDataset(Dataset):
