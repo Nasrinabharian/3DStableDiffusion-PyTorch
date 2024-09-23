@@ -4,8 +4,12 @@ import torch.nn as nn
 
 class Discriminator(nn.Module):
     r"""
-    PatchGAN Discriminator for 3D data.
-    Predicts a grid of values for 3D image patches.
+    PatchGAN Discriminator.
+    Rather than taking IMG_CHANNELSxIMG_HxIMG_W all the way to
+    1 scalar value , we instead predict grid of values.
+    Where each grid is prediction of how likely
+    the discriminator thinks that the image patch corresponding
+    to the grid cell is real
     """
     
     def __init__(self, im_channels=3,
@@ -19,12 +23,12 @@ class Discriminator(nn.Module):
         layers_dim = [self.im_channels] + conv_channels + [1]
         self.layers = nn.ModuleList([
             nn.Sequential(
-                nn.Conv3d(layers_dim[i], layers_dim[i + 1],
+                nn.Conv2d(layers_dim[i], layers_dim[i + 1],
                           kernel_size=kernels[i],
                           stride=strides[i],
                           padding=paddings[i],
-                          bias=False if i != 0 else True),
-                nn.BatchNorm3d(layers_dim[i + 1]) if i != len(layers_dim) - 2 and i != 0 else nn.Identity(),
+                          bias=False if i !=0 else True),
+                nn.BatchNorm2d(layers_dim[i + 1]) if i != len(layers_dim) - 2 and i != 0 else nn.Identity(),
                 activation if i != len(layers_dim) - 2 else nn.Identity()
             )
             for i in range(len(layers_dim) - 1)
@@ -38,7 +42,6 @@ class Discriminator(nn.Module):
 
 
 if __name__ == '__main__':
-    # Input tensor for 3D data: (batch_size, channels, depth, height, width)
-    x = torch.randn((2, 3, 64, 64, 64))  # Example 3D input tensor
+    x = torch.randn((2,3, 256, 256))
     prob = Discriminator(im_channels=3)(x)
     print(prob.shape)

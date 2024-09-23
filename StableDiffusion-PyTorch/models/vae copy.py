@@ -1,6 +1,7 @@
-        import torch
+import torch
 import torch.nn as nn
-from models.blocks import DownBlock, MidBlock, UpBlock  # Using original block names
+from models.blocks import DownBlock, MidBlock, UpBlock
+
 
 class VAE(nn.Module):
     def __init__(self, im_channels, model_config):
@@ -31,7 +32,7 @@ class VAE(nn.Module):
         self.up_sample = list(reversed(self.down_sample))
         
         ##################### Encoder ######################
-        self.encoder_conv_in = nn.Conv3d(im_channels, self.down_channels[0], kernel_size=3, padding=1)
+        self.encoder_conv_in = nn.Conv2d(im_channels, self.down_channels[0], kernel_size=3, padding=(1, 1))
         
         # Downblock + Midblock
         self.encoder_layers = nn.ModuleList([])
@@ -52,15 +53,16 @@ class VAE(nn.Module):
                                               norm_channels=self.norm_channels))
         
         self.encoder_norm_out = nn.GroupNorm(self.norm_channels, self.down_channels[-1])
-        self.encoder_conv_out = nn.Conv3d(self.down_channels[-1], 2 * self.z_channels, kernel_size=3, padding=1)
+        self.encoder_conv_out = nn.Conv2d(self.down_channels[-1], 2*self.z_channels, kernel_size=3, padding=1)
         
-        # Latent Dimension is 2 * Latent because we are predicting mean & variance
-        self.pre_quant_conv = nn.Conv3d(2 * self.z_channels, 2 * self.z_channels, kernel_size=1)
+        # Latent Dimension is 2*Latent because we are predicting mean & variance
+        self.pre_quant_conv = nn.Conv2d(2*self.z_channels, 2*self.z_channels, kernel_size=1)
         ####################################################
         
+        
         ##################### Decoder ######################
-        self.post_quant_conv = nn.Conv3d(self.z_channels, self.z_channels, kernel_size=1)
-        self.decoder_conv_in = nn.Conv3d(self.z_channels, self.mid_channels[-1], kernel_size=3, padding=1)
+        self.post_quant_conv = nn.Conv2d(self.z_channels, self.z_channels, kernel_size=1)
+        self.decoder_conv_in = nn.Conv2d(self.z_channels, self.mid_channels[-1], kernel_size=3, padding=(1, 1))
         
         # Midblock + Upblock
         self.decoder_mids = nn.ModuleList([])
@@ -81,11 +83,11 @@ class VAE(nn.Module):
                                                norm_channels=self.norm_channels))
         
         self.decoder_norm_out = nn.GroupNorm(self.norm_channels, self.down_channels[0])
-        self.decoder_conv_out = nn.Conv3d(self.down_channels[0], im_channels, kernel_size=3, padding=1)
+        self.decoder_conv_out = nn.Conv2d(self.down_channels[0], im_channels, kernel_size=3, padding=1)
     
     def encode(self, x):
         out = self.encoder_conv_in(x)
-        for down in self.encoder_layers:
+        for idx, down in enumerate(self.encoder_layers):
             out = down(out)
         for mid in self.encoder_mids:
             out = mid(out)
@@ -104,7 +106,7 @@ class VAE(nn.Module):
         out = self.decoder_conv_in(out)
         for mid in self.decoder_mids:
             out = mid(out)
-        for up in self.decoder_layers:
+        for idx, up in enumerate(self.decoder_layers):
             out = up(out)
 
         out = self.decoder_norm_out(out)
@@ -116,3 +118,4 @@ class VAE(nn.Module):
         z, encoder_output = self.encode(x)
         out = self.decode(z)
         return out, encoder_output
+

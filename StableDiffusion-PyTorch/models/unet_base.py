@@ -37,7 +37,7 @@ class Unet(nn.Module):
         )
         
         self.up_sample = list(reversed(self.down_sample))
-        self.conv_in = nn.Conv3d(im_channels, self.down_channels[0], kernel_size=3, padding=1)
+        self.conv_in = nn.Conv2d(im_channels, self.down_channels[0], kernel_size=3, padding=1)
         
         self.downs = nn.ModuleList([])
         for i in range(len(self.down_channels) - 1):
@@ -63,7 +63,7 @@ class Unet(nn.Module):
                                         norm_channels=self.norm_channels))
         
         self.norm_out = nn.GroupNorm(self.norm_channels, self.conv_out_channels)
-        self.conv_out = nn.Conv3d(self.conv_out_channels, im_channels, kernel_size=3, padding=1)
+        self.conv_out = nn.Conv2d(self.conv_out_channels, im_channels, kernel_size=3, padding=1)
     
     def forward(self, x, t):
         # Shapes assuming downblocks are [C1, C2, C3, C4]

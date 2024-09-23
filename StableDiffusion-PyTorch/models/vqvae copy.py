@@ -1,8 +1,9 @@
-        import torch
+import torch
 import torch.nn as nn
-from models.blocks import DownBlock, MidBlock, UpBlock  # Using original block names
+from models.blocks import DownBlock, MidBlock, UpBlock
 
-class VAE(nn.Module):
+
+class VQVAE(nn.Module):
     def __init__(self, im_channels, model_config):
         super().__init__()
         self.down_channels = model_config['down_channels']
@@ -17,6 +18,7 @@ class VAE(nn.Module):
         
         # Latent Dimension
         self.z_channels = model_config['z_channels']
+        self.codebook_size = model_config['codebook_size']
         self.norm_channels = model_config['norm_channels']
         self.num_heads = model_config['num_heads']
         
@@ -31,7 +33,7 @@ class VAE(nn.Module):
         self.up_sample = list(reversed(self.down_sample))
         
         ##################### Encoder ######################
-        self.encoder_conv_in = nn.Conv3d(im_channels, self.down_channels[0], kernel_size=3, padding=1)
+        self.encoder_conv_in = nn.Conv2d(im_channels, self.down_channels[0], kernel_size=3, padding=(1, 1))
         
         # Downblock + Midblock
         self.encoder_layers = nn.ModuleList([])
@@ -52,15 +54,20 @@ class VAE(nn.Module):
                                               norm_channels=self.norm_channels))
         
         self.encoder_norm_out = nn.GroupNorm(self.norm_channels, self.down_channels[-1])
-        self.encoder_conv_out = nn.Conv3d(self.down_channels[-1], 2 * self.z_channels, kernel_size=3, padding=1)
+        self.encoder_conv_out = nn.Conv2d(self.down_channels[-1], self.z_channels, kernel_size=3, padding=1)
         
-        # Latent Dimension is 2 * Latent because we are predicting mean & variance
-        self.pre_quant_conv = nn.Conv3d(2 * self.z_channels, 2 * self.z_channels, kernel_size=1)
+        # Pre Quantization Convolution
+        self.pre_quant_conv = nn.Conv2d(self.z_channels, self.z_channels, kernel_size=1)
+        
+        # Codebook
+        self.embedding = nn.Embedding(self.codebook_size, self.z_channels)
         ####################################################
         
         ##################### Decoder ######################
-        self.post_quant_conv = nn.Conv3d(self.z_channels, self.z_channels, kernel_size=1)
-        self.decoder_conv_in = nn.Conv3d(self.z_channels, self.mid_channels[-1], kernel_size=3, padding=1)
+        
+        # Post Quantization Convolution
+        self.post_quant_conv = nn.Conv2d(self.z_channels, self.z_channels, kernel_size=1)
+        self.decoder_conv_in = nn.Conv2d(self.z_channels, self.mid_channels[-1], kernel_size=3, padding=(1, 1))
         
         # Midblock + Upblock
         self.decoder_mids = nn.ModuleList([])
@@ -77,15 +84,50 @@ class VAE(nn.Module):
                                                t_emb_dim=None, up_sample=self.down_sample[i - 1],
                                                num_heads=self.num_heads,
                                                num_layers=self.num_up_layers,
-                                               attn=self.attns[i - 1],
+                                               attn=self.attns[i-1],
                                                norm_channels=self.norm_channels))
         
         self.decoder_norm_out = nn.GroupNorm(self.norm_channels, self.down_channels[0])
-        self.decoder_conv_out = nn.Conv3d(self.down_channels[0], im_channels, kernel_size=3, padding=1)
+        self.decoder_conv_out = nn.Conv2d(self.down_channels[0], im_channels, kernel_size=3, padding=1)
     
+    def quantize(self, x):
+        B, C, H, W = x.shape
+        
+        # B, C, H, W -> B, H, W, C
+        x = x.permute(0, 2, 3, 1)
+        
+        # B, H, W, C -> B, H*W, C
+        x = x.reshape(x.size(0), -1, x.size(-1))
+        
+        # Find nearest embedding/codebook vector
+        # dist between (B, H*W, C) and (B, K, C) -> (B, H*W, K)
+        dist = torch.cdist(x, self.embedding.weight[None, :].repeat((x.size(0), 1, 1)))
+        # (B, H*W)
+        min_encoding_indices = torch.argmin(dist, dim=-1)
+        
+        # Replace encoder output with nearest codebook
+        # quant_out -> B*H*W, C
+        quant_out = torch.index_select(self.embedding.weight, 0, min_encoding_indices.view(-1))
+        
+        # x -> B*H*W, C
+        x = x.reshape((-1, x.size(-1)))
+        commmitment_loss = torch.mean((quant_out.detach() - x) ** 2)
+        codebook_loss = torch.mean((quant_out - x.detach()) ** 2)
+        quantize_losses = {
+            'codebook_loss': codebook_loss,
+            'commitment_loss': commmitment_loss
+        }
+        # Straight through estimation
+        quant_out = x + (quant_out - x).detach()
+        
+        # quant_out -> B, C, H, W
+        quant_out = quant_out.reshape((B, H, W, C)).permute(0, 3, 1, 2)
+        min_encoding_indices = min_encoding_indices.reshape((-1, quant_out.size(-2), quant_out.size(-1)))
+        return quant_out, quantize_losses, min_encoding_indices
+
     def encode(self, x):
         out = self.encoder_conv_in(x)
-        for down in self.encoder_layers:
+        for idx, down in enumerate(self.encoder_layers):
             out = down(out)
         for mid in self.encoder_mids:
             out = mid(out)
@@ -93,10 +135,8 @@ class VAE(nn.Module):
         out = nn.SiLU()(out)
         out = self.encoder_conv_out(out)
         out = self.pre_quant_conv(out)
-        mean, logvar = torch.chunk(out, 2, dim=1)
-        std = torch.exp(0.5 * logvar)
-        sample = mean + std * torch.randn(mean.shape).to(device=x.device)
-        return sample, out
+        out, quant_losses, _ = self.quantize(out)
+        return out, quant_losses
     
     def decode(self, z):
         out = z
@@ -104,15 +144,16 @@ class VAE(nn.Module):
         out = self.decoder_conv_in(out)
         for mid in self.decoder_mids:
             out = mid(out)
-        for up in self.decoder_layers:
+        for idx, up in enumerate(self.decoder_layers):
             out = up(out)
-
+        
         out = self.decoder_norm_out(out)
         out = nn.SiLU()(out)
         out = self.decoder_conv_out(out)
         return out
-
+    
     def forward(self, x):
-        z, encoder_output = self.encode(x)
+        z, quant_losses = self.encode(x)
         out = self.decode(z)
-        return out, encoder_output
+        return out, z, quant_losses
+
