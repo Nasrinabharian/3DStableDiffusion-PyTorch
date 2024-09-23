@@ -2,6 +2,8 @@ import torch
 import torchvision
 import argparse
 import yaml
+import nibabel as nib
+import numpy as np
 import os
 from torchvision.utils import make_grid
 from PIL import Image
@@ -9,10 +11,7 @@ from tqdm import tqdm
 from models.unet_cond_base import Unet
 from models.vqvae import VQVAE
 from scheduler.linear_noise_scheduler import LinearNoiseScheduler
-from utils.config_utils import *
-#2 lines added
-from PIL import Image  
-import PIL  
+from tools.config_utils import *
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -23,6 +22,8 @@ def sample(model, scheduler, train_config, diffusion_model_config,
     Sample stepwise by going backward one timestep at a time.
     We save the x0 predictions
     """
+    #Nasrin
+    depth = dataset_config['im_size']
     im_size = dataset_config['im_size'] // 2 ** sum(autoencoder_model_config['down_sample'])
     
     ########### Sample random noise latent ##########
@@ -63,6 +64,12 @@ def sample(model, scheduler, train_config, diffusion_model_config,
     for i in tqdm(reversed(range(diffusion_config['num_timesteps']))):
         # Get prediction of noise
         t = (torch.ones((xt.shape[0],))*i).long().to(device)
+        #print("xt:", xt, " t: ", t, " cond: ", cond_input)
+        if xt.dim() == 4:
+            print("unsqueezed  *****")
+            xt = torch.unsqueeze(xt, 0)
+
+        print("xt:", xt.shape)
         noise_pred_cond = model(xt, t, cond_input)
         
         if cf_guidance_scale > 1:
@@ -83,24 +90,22 @@ def sample(model, scheduler, train_config, diffusion_model_config,
         ims = torch.clamp(ims, -1., 1.).detach().cpu()
         ims = (ims + 1) / 2
 
-        #added lines
-        save_dir = '/Users/abharian/LDM_Project/StableDiffusion-PyTorch/mnist/Generated_Results'
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Iterate through the tensor and save each image separately
-        for j, im in enumerate(ims):
-                img = torchvision.transforms.ToPILImage()(im)
-                img.save(os.path.join(save_dir, f'image_{j+1}.png'))
-        #end of added lines
+        for j in range(ims.shape[0]):
+            sample_volume = ims[j].numpy()  # Shape (z_channels, depth, height, width)
+            #sample_volume = np.transpose(sample_volume, (1, 2, 3, 0))  # (depth, height, width, z_channels)
+            nifti_img = nib.Nifti1Image(sample_volume, affine=np.eye(4))  # Use identity matrix for affine
+            nifti_path = os.path.join(train_config['task_name'], 'cond_class_samples', f'x0_{i}_sample_{j}.nii')
+            nib.save(nifti_img, nifti_path)
 
 
-        grid = make_grid(ims, nrow=1)
+
+        '''grid = make_grid(ims, nrow=1)
         img = torchvision.transforms.ToPILImage()(grid)
         
         if not os.path.exists(os.path.join(train_config['task_name'], 'cond_class_samples')):
             os.mkdir(os.path.join(train_config['task_name'], 'cond_class_samples'))
         img.save(os.path.join(train_config['task_name'], 'cond_class_samples', 'x0_{}.png'.format(i)))
-        img.close()
+        img.close()'''
     ##############################################################
 
 def infer(args):
@@ -133,10 +138,10 @@ def infer(args):
     #                               train_config['ldm_ckpt_name'])):
 
     if os.path.exists(os.path.join('/Users/abharian/LDM_Project/StableDiffusion-PyTorch/mnist',
-                                   'ddpm_ckpt_class_cond.pth')):
+                                   'ddpm_ckpt.pth')):
         print('Loaded unet checkpoint')
         model.load_state_dict(torch.load(os.path.join('/Users/abharian/LDM_Project/StableDiffusion-PyTorch/mnist',
-                                   'ddpm_ckpt_class_cond.pth'),
+                                   'ddpm_ckpt.pth'),
                                          map_location=device))
 
         #model.load_state_dict(torch.load(os.path.join(train_config['task_name'],

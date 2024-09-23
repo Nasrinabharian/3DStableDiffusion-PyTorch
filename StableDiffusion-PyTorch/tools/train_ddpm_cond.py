@@ -3,16 +3,17 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 from torch.optim import Adam
-from dataset.mnist_dataset import Npz3DDataset
+from dataset.mnist_dataset import MnistDataset
 from dataset.celeb_dataset import CelebDataset
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from models.unet_cond_base import Unet
 from models.vqvae import VQVAE
 from scheduler.linear_noise_scheduler import LinearNoiseScheduler
-from utils.text_utils import *
-from utils.config_utils import *
-from utils.diffusion_utils import *
-
+from tools.text_utils import *
+from tools.config_utils import *
+from tools.diffusion_utils import *
+from torch.utils.data import DataLoader, TensorDataset
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -58,7 +59,7 @@ def train(args):
                 empty_text_embed = get_text_representation([''], text_tokenizer, text_model, device)
             
     im_dataset_cls = {
-        'mnist': Npz3DDataset,
+        'mnist': MnistDataset,
         'celebhq': CelebDataset,
     }.get(dataset_config['name'])
     
@@ -71,9 +72,44 @@ def train(args):
                                                          train_config['vqvae_latent_dir_name']),
                                 condition_config=condition_config)
     
-    data_loader = DataLoader(im_dataset,
+    data_loader_old = DataLoader(im_dataset,
                              batch_size=train_config['ldm_batch_size'],
                              shuffle=True)
+    # Now modify the 2D images to 3D by repeating along the new dimension
+    # im_dataset.use_latents = True
+
+    new_images = []
+    new_labels = []
+    for batch in data_loader_old:
+        images, labels = batch  # Assuming batch returns (images, labels)
+        
+        # Expand the 2D images (batch_size, channels, height, width) to (batch_size, channels, height, width, depth)
+        # By repeating the image along the new (depth) dimension
+        #images = F.interpolate(images, size=(dataset_config['im_size'], dataset_config['im_size']), mode='bilinear', align_corners=False)
+
+        images_3d = images
+        #images.unsqueeze(-1).repeat(1, 1, 1, 1, 64)  # Repeating along the depth axis
+        
+        # Append to new lists
+        new_images.append(images_3d)
+        # new_labels.append(labels)
+        if isinstance(labels, dict) and 'class' in labels:
+            new_labels.append(labels['class'])  # Extract only the 'class' tensor
+        else:
+            raise ValueError("Expected labels to be a dict containing 'class'.")
+
+    # new_labels = [label_dict['class'] for label_dict in new_labels]
+
+
+    # Stack the new images and labels
+    new_images = torch.cat(new_images, dim=0)  # Combine into a single tensor
+    new_labels = torch.cat(new_labels, dim=0)
+
+    # Create a TensorDataset for the new 3D images
+    new_dataset = TensorDataset(new_images, new_labels)
+
+    # Create a new DataLoader for the 3D images
+    data_loader = DataLoader(new_dataset, batch_size=train_config['ldm_batch_size'], shuffle=True)
     
     # Instantiate the unet model
     model = Unet(im_channels=autoencoder_model_config['z_channels'],
@@ -91,9 +127,9 @@ def train(args):
         if os.path.exists(os.path.join(train_config['task_name'],
                                        train_config['vqvae_autoencoder_ckpt_name'])):
             print('Loaded vae checkpoint')
-            '''vae.load_state_dict(torch.load(os.path.join(train_config['task_name'],
+            vae.load_state_dict(torch.load(os.path.join(train_config['task_name'],
                                                         train_config['vqvae_autoencoder_ckpt_name']),
-                                           map_location=device))'''
+                                           map_location=device))
         else:
             raise Exception('VAE checkpoint not found and use_latents was disabled')
     
@@ -115,14 +151,13 @@ def train(args):
             cond_input = None
             if condition_config is not None:
                 im, cond_input = data
+                
             else:
                 im = data
             optimizer.zero_grad()
-            
-            if 'Segmented_intensity' in im:
-                segmented_intensity = im['Segmented_intensity']
-            im = segmented_intensity.float().to(device)
+            im = im.float().to(device)
             if not im_dataset.use_latents:
+               
                 with torch.no_grad():
                     im, _ = vae.encode(im)
                     
@@ -147,16 +182,32 @@ def train(args):
                 im_drop_prob = get_config_value(condition_config['image_condition_config'],
                                                       'cond_drop_prob', 0.)
                 cond_input['image'] = drop_image_condition(cond_input_image, im, im_drop_prob)
+            # if isinstance(cond_input, dict) and 'class' in cond_input:
+            #     validate_class_config(condition_config)
+            #     class_condition = torch.nn.functional.one_hot(
+            #         cond_input['class'],
+            #         condition_config['class_condition_config']['num_classes']).to(device)
+            #     class_drop_prob = get_config_value(condition_config['class_condition_config'],
+            #                            'cond_drop_prob', 0.)
+            #         # Drop condition
+            #     cond_input['class'] = drop_class_condition(class_condition, class_drop_prob, im)
+            # else:
+            #     raise ValueError('Conditioning Type Class but no class conditioning input present')
             if 'class' in condition_types:
-                assert 'class' in cond_input, 'Conditioning Type Class but no class conditioning input present'
+                # assert 'class' in cond_input, 'Conditioning Type Class but no class conditioning input present'
                 validate_class_config(condition_config)
+          
+                cond_input = {
+                    'class': cond_input  # Assign your class tensor here
+                }                
                 class_condition = torch.nn.functional.one_hot(
                     cond_input['class'],
-                    condition_config['class_condition_config']['num_classes']).to(device)
+                    condition_config['class_condition_config']['num_classes']
+                ).to(device)
                 class_drop_prob = get_config_value(condition_config['class_condition_config'],
                                                    'cond_drop_prob', 0.)
                 # Drop condition
-                cond_input['class'] = drop_class_condition(class_condition, class_drop_prob, im)
+                cond_input['class']= drop_class_condition(class_condition, class_drop_prob, im)
             ################################################
             
             # Sample random noise
